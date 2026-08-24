@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Site Sıra Takip",
+  "version": "1.0",
+  "description": "Google arama sonuçlarını sayfalar boyunca numaralar; ayrıca birden fazla site için ayrı kelime listeleri tanımlayıp her sitenin hangi kelimede kaçıncı sırada çıktığını otomatik tarar ve Excel'e aktarır.",
+  "permissions": ["storage"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.google.com/search*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
