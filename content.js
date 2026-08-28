@@ -502,6 +502,32 @@
     pagesRow.appendChild(pagesLabel);
     pagesRow.appendChild(pagesInput);
 
+    const parallelRow = document.createElement("div");
+    parallelRow.style.cssText = [
+      "all: initial !important",
+      "display: flex !important",
+      "align-items: center !important",
+      "gap: 6px !important",
+      "font-family: Arial, Helvetica, sans-serif !important",
+      "font-size: 12px !important",
+      "color: #333 !important",
+    ].join(";");
+    const parallelLabel = document.createElement("span");
+    parallelLabel.textContent = "Aynı anda kaç kelime:";
+    parallelLabel.style.cssText = "all: revert !important; font-size: 12px !important;";
+    const parallelInput = document.createElement("input");
+    parallelInput.type = "number";
+    parallelInput.min = "1";
+    parallelInput.value = "1";
+    parallelInput.title = "1 = sıralı (güvenli). Artırmak captcha riskini yükseltir.";
+    parallelInput.style.cssText = inputStyle + "width: 48px !important; padding: 4px !important;";
+    parallelRow.appendChild(parallelLabel);
+    parallelRow.appendChild(parallelInput);
+    const parallelWarn = document.createElement("span");
+    parallelWarn.textContent = "⚠ 1'den fazlası riski artırır";
+    parallelWarn.style.cssText = "all: revert !important; font-size: 11px !important; color: #b6402f !important;";
+    parallelRow.appendChild(parallelWarn);
+
     const slowRow = document.createElement("label");
     slowRow.style.cssText = [
       "all: initial !important",
@@ -746,8 +772,12 @@
       return /[;"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     }
 
-    // Bir (site, kelime) çiftinin durumunu job.results/currentIndex'e göre
+    // Bir (site, kelime) çiftinin durumunu, o grubu işleyen İŞÇİYE bakarak
     // hesaplar: bulunduysa sonucu, bulunamadıysa/sıradaysa durumunu döner.
+    function ownerWorker(job, groupIndex) {
+      return job.workers.find((w) => w.queueIdx.includes(groupIndex));
+    }
+
     function pairStatus(job, groupIndex, keyword, site) {
       const found = job.results.find(
         (r) => r.site === site && r.keyword === keyword && !r.notfound
@@ -757,13 +787,18 @@
         (r) => r.site === site && r.keyword === keyword && r.notfound
       );
       if (notfound) return { state: "notfound" };
-      const isCurrentGroup = job.active && groupIndex === job.currentIndex;
-      if (isCurrentGroup && job.pendingSites.includes(site)) {
-        return { state: "current" };
+
+      const worker = ownerWorker(job, groupIndex);
+      if (!worker) return { state: "pending" };
+      const posInWorker = worker.queueIdx.indexOf(groupIndex);
+      if (
+        !worker.done &&
+        posInWorker === worker.cursor &&
+        worker.pendingSites.includes(site)
+      ) {
+        return { state: "current", page: worker.pagesScanned + 1 };
       }
-      const groupDone =
-        groupIndex < job.currentIndex || (!job.active && groupIndex <= job.currentIndex);
-      if (groupDone) return { state: "notfound" };
+      if (worker.done || posInWorker < worker.cursor) return { state: "notfound" };
       return { state: "pending" };
     }
 
@@ -813,7 +848,7 @@
           if (st.state === "found") {
             line = `✓ ${group.keyword} — ${st.found.page}. sayfa, ${st.found.index}. sıra`;
           } else if (st.state === "current") {
-            line = `… ${group.keyword} (${job.pagesScanned + 1}. sayfa)`;
+            line = `… ${group.keyword} (${st.page}. sayfa)`;
           } else if (st.state === "notfound") {
             line = `✗ ${group.keyword} — bulunamadı`;
           } else {
@@ -844,32 +879,56 @@
     // site varsa tek bir Google araması içinde birlikte kontrol edilir.
     // Bu, "Tüm Siteleri Ara"da ortak kelimeler için gereksiz tekrar aramayı
     // önler (10 site x 20 kelime = 200 yerine, ortak kelimeler kadar az arama).
+    // Grupları N işçiye (paralel sekmeye) round-robin dağıtır. İşçi 0 mevcut
+    // sekmede devam eder, diğerleri (incognito ise ayrı gizli pencerede,
+    // değilse arka planda yeni sekmede) kendi ilk kelimesiyle açılır.
     function startJob(groups, incognito) {
       if (groups.length === 0 || !chrome?.storage?.local) return;
+      const parallelism = Math.max(1, parseInt(parallelInput.value, 10) || 1);
+
+      const workers = [];
+      for (let w = 0; w < parallelism; w++) {
+        const queueIdx = [];
+        for (let i = w; i < groups.length; i += parallelism) queueIdx.push(i);
+        workers.push({
+          queueIdx,
+          cursor: 0,
+          pendingSites: queueIdx.length ? groups[queueIdx[0]].sites.slice() : [],
+          pagesScanned: 0,
+          done: queueIdx.length === 0,
+        });
+      }
+
       chrome.storage.local.set(
         {
           snrRankJob: {
             groups,
-            currentIndex: 0,
-            pendingSites: groups[0].sites.slice(),
-            pagesScanned: 0,
+            workers,
             maxPages: Math.max(1, parseInt(pagesInput.value, 10) || 5),
             slow: slowCheckbox.checked,
             results: [],
-            active: true,
+            active: workers.some((w) => !w.done),
           },
         },
         () => {
-          const url = new URL("https://www.google.com/search");
-          url.searchParams.set("q", groups[0].keyword);
-          if (incognito) {
-            chrome.runtime.sendMessage({
-              type: "snrOpenIncognito",
-              url: url.toString(),
-            });
-          } else {
-            location.href = url.toString();
-          }
+          workers.forEach((worker, i) => {
+            if (worker.done) return;
+            const url = new URL("https://www.google.com/search");
+            url.searchParams.set("q", groups[worker.queueIdx[0]].keyword);
+            if (incognito) {
+              chrome.runtime.sendMessage({
+                type: "snrOpenIncognito",
+                url: url.toString(),
+              });
+            } else if (i === 0) {
+              location.href = url.toString();
+            } else {
+              chrome.runtime.sendMessage({
+                type: "snrOpenTab",
+                url: url.toString(),
+              });
+            }
+          });
         }
       );
     }
@@ -945,6 +1004,7 @@
     wrap.appendChild(newSiteRow);
     wrap.appendChild(textarea);
     wrap.appendChild(pagesRow);
+    wrap.appendChild(parallelRow);
     wrap.appendChild(slowRow);
     wrap.appendChild(searchSelectedBtn);
     wrap.appendChild(searchAllBtn);
@@ -956,11 +1016,13 @@
     return wrap;
   }
 
-  // job.groups = [{keyword, sites:[...]}] — her grup TEK bir Google araması
-  // gerektirir. Bu fonksiyon şu anki sayfada job.pendingSites listesindeki
-  // TÜM siteleri birlikte arar (aynı arama sonucunda kaç site varsa hepsini
-  // yakalar). Hepsi bulunursa ya da sayfa limiti dolarsa bir SONRAKİ gruba
-  // (yeni kelime → yeni Google araması) geçer.
+  // job.workers = paralel çalışan işçiler; her biri kendi sekmesinde,
+  // job.groups içindeki kendine ait bir alt kümeyi sırayla işler. Bu sayfa
+  // hangi işçinin "şu an aradığı kelime"sine denk geliyorsa o işçi
+  // ilerletilir (diğer sekmelerdeki işçilere dokunulmaz).
+  // Not: chrome.storage.local üzerinde get→set atomik değildir; birden
+  // fazla sekme TAM olarak aynı anda yazarsa nadiren bir sonuç kaybolabilir
+  // (bir sonraki turda kendiliğinden fark edilmez, ama ölümcül değildir).
   let searchJobHandled = false;
   function runSearchJobOnce() {
     if (searchJobHandled) return;
@@ -969,11 +1031,21 @@
     chrome.storage.local.get("snrRankJob", ({ snrRankJob: job }) => {
       if (!job || !job.active) return;
 
-      const group = job.groups[job.currentIndex];
       const params = new URLSearchParams(location.search);
-      if (!group || params.get("q") !== group.keyword) return;
+      const q = params.get("q");
+      const workerIndex = job.workers.findIndex((w) => {
+        if (w.done) return false;
+        const gi = w.queueIdx[w.cursor];
+        const g = job.groups[gi];
+        return g && g.keyword === q;
+      });
+      if (workerIndex === -1) return;
 
       searchJobHandled = true;
+
+      const worker = job.workers[workerIndex];
+      const groupIndex = worker.queueIdx[worker.cursor];
+      const group = job.groups[groupIndex];
 
       const links = getResultLinks();
       const currentPage = Math.floor(getStartIndex() / 10) + 1;
@@ -989,7 +1061,7 @@
       }
 
       const stillPending = [];
-      job.pendingSites.forEach((site) => {
+      worker.pendingSites.forEach((site) => {
         const matchIndex = links.findIndex((link) => {
           const host = hostOf(link);
           return host === site || host.endsWith("." + site);
@@ -1008,7 +1080,7 @@
           stillPending.push(site);
         }
       });
-      job.pendingSites = stillPending;
+      worker.pendingSites = stillPending;
 
       function navigateTo(href) {
         if (job.slow) {
@@ -1019,39 +1091,43 @@
         }
       }
 
-      function goToIndex(index) {
+      function goToKeyword(keyword) {
         const url = new URL("https://www.google.com/search");
-        url.searchParams.set("q", job.groups[index].keyword);
+        url.searchParams.set("q", keyword);
         navigateTo(url.toString());
       }
 
       function advance() {
         // Bu grupta hâlâ bulunamayan siteler varsa "bulunamadı" olarak kapat.
-        job.pendingSites.forEach((site) => {
+        worker.pendingSites.forEach((site) => {
           job.results.push({ site, keyword: group.keyword, notfound: true });
         });
 
-        const nextIndex = job.currentIndex + 1;
-        if (nextIndex >= job.groups.length) {
-          job.active = false;
+        const nextCursor = worker.cursor + 1;
+        if (nextCursor >= worker.queueIdx.length) {
+          worker.done = true;
+          job.active = job.workers.some((w) => !w.done);
           chrome.storage.local.set({ snrRankJob: job });
           return;
         }
-        job.currentIndex = nextIndex;
-        job.pagesScanned = 0;
-        job.pendingSites = job.groups[nextIndex].sites.slice();
-        chrome.storage.local.set({ snrRankJob: job }, () => goToIndex(nextIndex));
+        worker.cursor = nextCursor;
+        worker.pagesScanned = 0;
+        const nextGi = worker.queueIdx[nextCursor];
+        worker.pendingSites = job.groups[nextGi].sites.slice();
+        chrome.storage.local.set({ snrRankJob: job }, () =>
+          goToKeyword(job.groups[nextGi].keyword)
+        );
       }
 
-      if (job.pendingSites.length === 0) {
+      if (worker.pendingSites.length === 0) {
         advance();
         return;
       }
 
-      job.pagesScanned += 1;
+      worker.pagesScanned += 1;
       const nextLink = document.getElementById("pnnext");
 
-      if (job.pagesScanned < job.maxPages && nextLink && nextLink.href) {
+      if (worker.pagesScanned < job.maxPages && nextLink && nextLink.href) {
         const nextHref = nextLink.href;
         chrome.storage.local.set({ snrRankJob: job }, () => {
           navigateTo(nextHref);
