@@ -746,23 +746,45 @@
       return /[;"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     }
 
+    // Bir (site, kelime) çiftinin durumunu job.results/currentIndex'e göre
+    // hesaplar: bulunduysa sonucu, bulunamadıysa/sıradaysa durumunu döner.
+    function pairStatus(job, groupIndex, keyword, site) {
+      const found = job.results.find(
+        (r) => r.site === site && r.keyword === keyword && !r.notfound
+      );
+      if (found) return { state: "found", found };
+      const notfound = job.results.some(
+        (r) => r.site === site && r.keyword === keyword && r.notfound
+      );
+      if (notfound) return { state: "notfound" };
+      const isCurrentGroup = job.active && groupIndex === job.currentIndex;
+      if (isCurrentGroup && job.pendingSites.includes(site)) {
+        return { state: "current" };
+      }
+      const groupDone =
+        groupIndex < job.currentIndex || (!job.active && groupIndex <= job.currentIndex);
+      if (groupDone) return { state: "notfound" };
+      return { state: "pending" };
+    }
+
     copyBtn.addEventListener("click", () => {
       const job = JSON.parse(copyBtn.dataset.job || "{}");
-      if (!job.queue) return;
+      if (!job.groups) return;
 
       const rows = [["Site", "Kelime", "Sayfa", "Sıra", "Durum"]];
-      job.queue.forEach((item, i) => {
-        const found = job.results.find(
-          (r) => r.site === item.site && r.keyword === item.keyword && !r.notfound
-        );
-        const done = i < job.currentIndex || (!job.active && i <= job.currentIndex);
-        if (found) {
-          rows.push([item.site, item.keyword, found.page, found.index, "Bulundu"]);
-        } else if (done) {
-          rows.push([item.site, item.keyword, "", "", "Bulunamadı"]);
-        } else {
-          rows.push([item.site, item.keyword, "", "", "Sırada"]);
-        }
+      job.groups.forEach((group, gi) => {
+        group.sites.forEach((site) => {
+          const st = pairStatus(job, gi, group.keyword, site);
+          if (st.state === "found") {
+            rows.push([site, group.keyword, st.found.page, st.found.index, "Bulundu"]);
+          } else if (st.state === "notfound") {
+            rows.push([site, group.keyword, "", "", "Bulunamadı"]);
+          } else if (st.state === "current") {
+            rows.push([site, group.keyword, "", "", "Aranıyor"]);
+          } else {
+            rows.push([site, group.keyword, "", "", "Sırada"]);
+          }
+        });
       });
 
       const csv = "﻿" + rows.map((r) => r.map(csvEscape).join(";")).join("\r\n");
@@ -783,24 +805,22 @@
       resultsBox.style.setProperty("display", "flex", "important");
 
       const bySite = new Map();
-      job.queue.forEach((item, i) => {
-        if (!bySite.has(item.site)) bySite.set(item.site, []);
-        const found = job.results.find(
-          (r) => r.site === item.site && r.keyword === item.keyword && !r.notfound
-        );
-        const isCurrent = job.active && i === job.currentIndex;
-        const done = i < job.currentIndex || (!job.active && i <= job.currentIndex);
-        let line;
-        if (found) {
-          line = `✓ ${item.keyword} — ${found.page}. sayfa, ${found.index}. sıra`;
-        } else if (isCurrent) {
-          line = `… ${item.keyword} (${job.pagesScanned + 1}. sayfa)`;
-        } else if (done) {
-          line = `✗ ${item.keyword} — bulunamadı`;
-        } else {
-          line = `${item.keyword} — sırada`;
-        }
-        bySite.get(item.site).push(line);
+      job.groups.forEach((group, gi) => {
+        group.sites.forEach((site) => {
+          if (!bySite.has(site)) bySite.set(site, []);
+          const st = pairStatus(job, gi, group.keyword, site);
+          let line;
+          if (st.state === "found") {
+            line = `✓ ${group.keyword} — ${st.found.page}. sayfa, ${st.found.index}. sıra`;
+          } else if (st.state === "current") {
+            line = `… ${group.keyword} (${job.pagesScanned + 1}. sayfa)`;
+          } else if (st.state === "notfound") {
+            line = `✗ ${group.keyword} — bulunamadı`;
+          } else {
+            line = `${group.keyword} — sırada`;
+          }
+          bySite.get(site).push(line);
+        });
       });
 
       bySite.forEach((lines, site) => {
@@ -820,13 +840,18 @@
       copyBtn.dataset.job = JSON.stringify(job);
     }
 
-    function startJob(queue, incognito) {
-      if (queue.length === 0 || !chrome?.storage?.local) return;
+    // groups: [{keyword, sites:[...]}] — AYNI kelimeyi arayan birden fazla
+    // site varsa tek bir Google araması içinde birlikte kontrol edilir.
+    // Bu, "Tüm Siteleri Ara"da ortak kelimeler için gereksiz tekrar aramayı
+    // önler (10 site x 20 kelime = 200 yerine, ortak kelimeler kadar az arama).
+    function startJob(groups, incognito) {
+      if (groups.length === 0 || !chrome?.storage?.local) return;
       chrome.storage.local.set(
         {
           snrRankJob: {
-            queue,
+            groups,
             currentIndex: 0,
+            pendingSites: groups[0].sites.slice(),
             pagesScanned: 0,
             maxPages: Math.max(1, parseInt(pagesInput.value, 10) || 5),
             slow: slowCheckbox.checked,
@@ -836,7 +861,7 @@
         },
         () => {
           const url = new URL("https://www.google.com/search");
-          url.searchParams.set("q", queue[0].keyword);
+          url.searchParams.set("q", groups[0].keyword);
           if (incognito) {
             chrome.runtime.sendMessage({
               type: "snrOpenIncognito",
@@ -849,63 +874,71 @@
       );
     }
 
-    function getSelectedQueue() {
+    function getSelectedGroups() {
       if (!selectedSite) {
         alert("Önce bir site seç veya '+ Ekle' ile oluştur.");
         return null;
       }
-      const keywords = textarea.value
-        .split("\n")
-        .map((s) => s.trim())
-        .filter(Boolean);
+      const keywords = Array.from(
+        new Set(
+          textarea.value
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean)
+        )
+      );
       if (keywords.length === 0) {
         alert("Kelime listesi boş.");
         return null;
       }
       sitesData[selectedSite] = keywords;
-      return keywords.map((keyword) => ({ site: selectedSite, keyword }));
+      return keywords.map((keyword) => ({ keyword, sites: [selectedSite] }));
     }
 
-    function getAllQueue() {
+    function getAllGroups() {
       const sites = Object.keys(sitesData);
       if (sites.length === 0) {
         alert("Önce '+ Ekle' ile en az bir site oluştur.");
         return null;
       }
-      const queue = [];
+      // Aynı kelimeyi isteyen tüm siteleri tek grupta topla.
+      const byKeyword = new Map();
       sites.forEach((site) => {
-        (sitesData[site] || []).forEach((keyword) => queue.push({ site, keyword }));
+        (sitesData[site] || []).forEach((keyword) => {
+          if (!byKeyword.has(keyword)) byKeyword.set(keyword, []);
+          byKeyword.get(keyword).push(site);
+        });
       });
-      if (queue.length === 0) {
+      if (byKeyword.size === 0) {
         alert("Hiçbir sitede kelime listesi yok.");
         return null;
       }
-      return queue;
+      return Array.from(byKeyword, ([keyword, sites]) => ({ keyword, sites }));
     }
 
     searchSelectedBtn.addEventListener("click", () => {
-      const queue = getSelectedQueue();
-      if (!queue) return;
+      const groups = getSelectedGroups();
+      if (!groups) return;
       // Aramayı başlatmadan önce kutudaki kelimeleri sessizce kaydediyoruz,
       // böylece "Kaydet"e basılmasa bile otomatik sayfa geçişlerinde liste
       // kaybolmaz.
-      persistSitesData(() => startJob(queue, false));
+      persistSitesData(() => startJob(groups, false));
     });
 
     searchAllBtn.addEventListener("click", () => {
-      const queue = getAllQueue();
-      if (queue) startJob(queue, false);
+      const groups = getAllGroups();
+      if (groups) startJob(groups, false);
     });
 
     searchSelectedIncognitoBtn.addEventListener("click", () => {
-      const queue = getSelectedQueue();
-      if (!queue) return;
-      persistSitesData(() => startJob(queue, true));
+      const groups = getSelectedGroups();
+      if (!groups) return;
+      persistSitesData(() => startJob(groups, true));
     });
 
     searchAllIncognitoBtn.addEventListener("click", () => {
-      const queue = getAllQueue();
-      if (queue) startJob(queue, true);
+      const groups = getAllGroups();
+      if (groups) startJob(groups, true);
     });
 
     wrap.appendChild(siteRow);
@@ -923,12 +956,11 @@
     return wrap;
   }
 
-  // job.queue = [{site, keyword}, ...] — her eleman ayrı bir Google araması
-  // gerektirir (site+kelime çiftine göre). Bu fonksiyon şu anki sayfada
-  // job.queue[job.currentIndex].site'ı arar; bulursa veya sayfa limiti
-  // dolarsa bir SONRAKİ kuyruk elemanına (yeni kelime → yeni Google araması)
-  // geçer. Ardışık elemanların kelimesi aynıysa (aynı kelime farklı site
-  // sıradaysa) sayfa yeniden yüklenmeden aynı sonuçlar üzerinde devam eder.
+  // job.groups = [{keyword, sites:[...]}] — her grup TEK bir Google araması
+  // gerektirir. Bu fonksiyon şu anki sayfada job.pendingSites listesindeki
+  // TÜM siteleri birlikte arar (aynı arama sonucunda kaç site varsa hepsini
+  // yakalar). Hepsi bulunursa ya da sayfa limiti dolarsa bir SONRAKİ gruba
+  // (yeni kelime → yeni Google araması) geçer.
   let searchJobHandled = false;
   function runSearchJobOnce() {
     if (searchJobHandled) return;
@@ -937,9 +969,9 @@
     chrome.storage.local.get("snrRankJob", ({ snrRankJob: job }) => {
       if (!job || !job.active) return;
 
-      const current = job.queue[job.currentIndex];
+      const group = job.groups[job.currentIndex];
       const params = new URLSearchParams(location.search);
-      if (!current || params.get("q") !== current.keyword) return;
+      if (!group || params.get("q") !== group.keyword) return;
 
       searchJobHandled = true;
 
@@ -956,11 +988,27 @@
         }
       }
 
-      const matchIndex = links.findIndex((link) => {
-        const host = hostOf(link);
-        return host === current.site || host.endsWith("." + current.site);
+      const stillPending = [];
+      job.pendingSites.forEach((site) => {
+        const matchIndex = links.findIndex((link) => {
+          const host = hostOf(link);
+          return host === site || host.endsWith("." + site);
+        });
+        if (matchIndex >= 0) {
+          const match = links[matchIndex];
+          match.style.setProperty("outline", `3px solid ${THEME.teal}`, "important");
+          match.style.setProperty("outline-offset", "3px", "important");
+          job.results.push({
+            site,
+            keyword: group.keyword,
+            page: currentPage,
+            index: matchIndex + 1,
+          });
+        } else {
+          stillPending.push(site);
+        }
       });
-      const match = matchIndex >= 0 ? links[matchIndex] : null;
+      job.pendingSites = stillPending;
 
       function navigateTo(href) {
         if (job.slow) {
@@ -973,40 +1021,29 @@
 
       function goToIndex(index) {
         const url = new URL("https://www.google.com/search");
-        url.searchParams.set("q", job.queue[index].keyword);
+        url.searchParams.set("q", job.groups[index].keyword);
         navigateTo(url.toString());
       }
 
       function advance() {
+        // Bu grupta hâlâ bulunamayan siteler varsa "bulunamadı" olarak kapat.
+        job.pendingSites.forEach((site) => {
+          job.results.push({ site, keyword: group.keyword, notfound: true });
+        });
+
         const nextIndex = job.currentIndex + 1;
-        if (nextIndex >= job.queue.length) {
+        if (nextIndex >= job.groups.length) {
           job.active = false;
           chrome.storage.local.set({ snrRankJob: job });
           return;
         }
         job.currentIndex = nextIndex;
         job.pagesScanned = 0;
-        const next = job.queue[nextIndex];
-        if (next.keyword === current.keyword) {
-          // Aynı kelime, farklı site: sayfa değişmeden devam edebiliriz.
-          chrome.storage.local.set({ snrRankJob: job }, () => {
-            searchJobHandled = false;
-            runSearchJobOnce();
-          });
-        } else {
-          chrome.storage.local.set({ snrRankJob: job }, () => goToIndex(nextIndex));
-        }
+        job.pendingSites = job.groups[nextIndex].sites.slice();
+        chrome.storage.local.set({ snrRankJob: job }, () => goToIndex(nextIndex));
       }
 
-      if (match) {
-        match.style.setProperty("outline", `3px solid ${THEME.teal}`, "important");
-        match.style.setProperty("outline-offset", "3px", "important");
-        job.results.push({
-          site: current.site,
-          keyword: current.keyword,
-          page: currentPage,
-          index: matchIndex + 1,
-        });
+      if (job.pendingSites.length === 0) {
         advance();
         return;
       }
@@ -1020,7 +1057,6 @@
           navigateTo(nextHref);
         });
       } else {
-        job.results.push({ site: current.site, keyword: current.keyword, notfound: true });
         advance();
       }
     });
