@@ -13,5 +13,11 @@
       "js": ["content.js"],
       "run_at": "document_idle"
     }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["pdfjs/pdf.min.mjs", "pdfjs/pdf.worker.min.mjs"],
+      "matches": ["https://www.google.com/*"]
+    }
   ]
 }

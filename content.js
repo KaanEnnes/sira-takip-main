@@ -159,6 +159,255 @@
     savePageCounts(key, counts);
   }
 
+  // Yapıştırılan karışık metni tek-kelime-per-satır listesine dönüştürür:
+  // - Sekme/çoklu boşluk/";"/"|"/virgül gibi sütun ayraçlarıyla yan yana
+  //   duran ifadeleri ayrı satırlara böler (tek boşluğa dokunmaz, çünkü
+  //   "web tasarım ankara" gibi çok kelimeli TEK bir arama ifadesi olabilir).
+  // - Satır sonu "-" ile bölünmüş (kelime kırığı) satırları birleştirir.
+  // - Tek başına bağlaç ("ve", "ile" vb.) olan satırları komşu satıra ekler.
+  // - Büyük/küçük harf farkı gözetmeksizin tekrarları temizler.
+  function smartFormatKeywords(raw) {
+    const CONNECTORS = new Set(["ve", "ile", "için", "veya", "ya", "da", "de", "ki"]);
+
+    const rawLines = (raw || "").split(/\r\n|\r|\n/);
+    let pieces = [];
+    rawLines.forEach((line) => {
+      const parts = line
+        .split(/\t+|\s{2,}|;+|\|+|,(?!\s*\d)/)
+        .map((p) => p.trim())
+        .filter(Boolean);
+      if (parts.length) pieces.push(...parts);
+    });
+
+    const merged = [];
+    for (let i = 0; i < pieces.length; i++) {
+      let cur = pieces[i];
+      if (cur.endsWith("-") && i + 1 < pieces.length) {
+        cur = cur.slice(0, -1) + pieces[i + 1];
+        i++;
+      }
+      while (i + 1 < pieces.length && CONNECTORS.has(pieces[i + 1].toLocaleLowerCase("tr"))) {
+        i++;
+        cur = cur + " " + pieces[i];
+        if (i + 1 < pieces.length) {
+          i++;
+          cur = cur + " " + pieces[i];
+        }
+      }
+      merged.push(cur);
+    }
+
+    const seen = new Set();
+    const result = [];
+    merged.forEach((k) => {
+      const key = k.toLocaleLowerCase("tr");
+      if (k && !seen.has(key)) {
+        seen.add(key);
+        result.push(k);
+      }
+    });
+    return result.join("\n");
+  }
+
+  // ANA YÖNTEM: "Kelimeler" başlıklı sütunun X konumunu bulup sadece o
+  // sütundaki metni okur. PDF'in gerçek metin akışı satır sırasına göre
+  // OKUNAMIYOR — sıra/tarih hücreleri bazen kelimenin taştığı ikinci
+  // satırla aynı fiziksel satıra denk gelip araya karışabiliyor (gerçek
+  // pdf.js çıktısıyla doğrulandı). X-koordinatına göre süzmek bu karışıklığı
+  // baştan ortadan kaldırıyor: sıra/tarih sütunları hiç okunmuyor bile.
+  // Aynı hücrenin ikinci satıra taşan devamı (örn. "...ve" / "tedavisi")
+  // ile gerçekten YENİ bir satıra geçiş, aradaki dikey boşluğa (y-gap)
+  // bakılarak ayırt ediliyor: hücre içi satır atlaması ~15pt, satırlar
+  // arası geçiş ~30pt+ oluyor.
+  function extractKeywordsFromPdfPages(pages) {
+    let columnX = null;
+    outer: for (const items of pages) {
+      for (const it of items) {
+        if (/^(kelimeler?|keywords?)$/i.test((it.str || "").trim())) {
+          columnX = it.x;
+          break outer;
+        }
+      }
+    }
+    if (columnX === null) {
+      return extractKeywordLinesFromPdfTextFallback(joinPagesAsFullWidthLines(pages));
+    }
+
+    const TOLERANCE = 12;
+    const GAP_THRESHOLD = 22;
+    const out = [];
+
+    function processColumnRows(rows) {
+      let pending = [];
+      let lastY = null;
+      function flush() {
+        if (pending.length) {
+          out.push(pending.join(" ").replace(/\s+/g, " ").trim());
+          pending = [];
+        }
+        lastY = null;
+      }
+      rows.forEach((row) => {
+        const t = row.text.trim();
+        if (!t) return;
+        if (t.startsWith("(") || /^kelimeler?$/i.test(t)) {
+          flush();
+          return;
+        }
+        if (pending.length && lastY !== null && lastY - row.y > GAP_THRESHOLD) {
+          flush();
+        }
+        pending.push(t);
+        lastY = row.y;
+      });
+      flush();
+    }
+
+    pages.forEach((items) => {
+      const colItems = items.filter((it) => Math.abs(it.x - columnX) <= TOLERANCE && (it.str || "").trim());
+      const rows = [];
+      colItems.forEach((it) => {
+        const y = Math.round(it.y);
+        let row = rows.find((r) => Math.abs(r.y - y) <= 3);
+        if (!row) {
+          row = { y, parts: [] };
+          rows.push(row);
+        }
+        row.parts.push(it.str);
+      });
+      rows.sort((a, b) => b.y - a.y);
+      const lines = rows.map((r) => ({ y: r.y, text: r.parts.join(" ").replace(/\s+/g, " ").trim() }));
+      processColumnRows(lines);
+    });
+
+    const seen = new Set();
+    const result = out.filter((k) => {
+      const key = k.toLocaleLowerCase("tr");
+      if (!k || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    return result.length ? result : extractKeywordLinesFromPdfTextFallback(joinPagesAsFullWidthLines(pages));
+  }
+
+  function joinPagesAsFullWidthLines(pages) {
+    const allLines = [];
+    pages.forEach((items) => {
+      const rows = [];
+      items.forEach((it) => {
+        const y = Math.round(it.y);
+        let row = rows.find((r) => Math.abs(r.y - y) <= 3);
+        if (!row) {
+          row = { y, parts: [] };
+          rows.push(row);
+        }
+        row.parts.push(it);
+      });
+      rows.sort((a, b) => b.y - a.y);
+      rows.forEach((row) => {
+        row.parts.sort((a, b) => a.x - b.x);
+        allLines.push(row.parts.map((p) => p.str).join(" ").replace(/\s+/g, " ").trim());
+      });
+    });
+    return allLines;
+  }
+
+  // YEDEK YÖNTEM: "Kelimeler" sütunu bulunamayan (tablo şablonuna uymayan)
+  // PDF'ler için — parantez içi bölge/kapsam bilgisini ve sıra/derece
+  // hücrelerini satır içeriğine bakarak elemeye çalışır.
+  function extractKeywordLinesFromPdfTextFallback(lines) {
+    const RANK_TOKEN = /^(\(?ai\)?|\d+\.?\s*s[ıi]ra\)?|\d+\.?|s[ıi]ra[).]*|-+)$/i;
+    const DATE_TOKEN = /^\d{1,2}\/\d{1,2}\/\d{2,4}$/;
+
+    function isRankLine(line) {
+      const tokens = line.split(/\s+/).filter(Boolean);
+      return tokens.length > 0 && tokens.every((t) => RANK_TOKEN.test(t));
+    }
+    function isHeaderLine(line) {
+      const lower = line.toLocaleLowerCase("tr");
+      if (lower.includes("kelimeler") && lower.length < 40) return true;
+      const tokens = line.split(/\s+/).filter(Boolean);
+      const dateTokens = tokens.filter((t) => DATE_TOKEN.test(t));
+      return dateTokens.length >= 2;
+    }
+    function isTitleLine(line) {
+      return line === line.toLocaleUpperCase("tr") && /[A-ZÇĞİÖŞÜ]/.test(line) && line.length < 60;
+    }
+
+    // Google Dokümanlar/Word tablolarında hücre metni PDF'e çevrilirken
+    // sığmayan kelimeler bir alt satıra taşabiliyor ("...ve" / "tedavisi"
+    // gibi). Bu yüzden ardışık "kelime niteliğindeki" satırları TEK bir
+    // öbekte biriktirip, bir parantez/sıra satırına ya da satır içi sıra
+    // verisine (ör. "...köpekler - 9. Sıra 7. Sıra") rastlayınca o öbeği
+    // tek satır olarak kapatıyoruz (flush). Böylece hem çok satıra taşmış
+    // kelimeler doğru birleşir, hem de aynı kırık kelime ("tedavisi" gibi)
+    // iki farklı satırda tekrar edip yanlışlıkla tekilleştirme sırasında
+    // birbirini silmez.
+    const out = [];
+    let pending = [];
+    function flush() {
+      if (pending.length) {
+        out.push(pending.join(" "));
+        pending = [];
+      }
+    }
+
+    lines.forEach((raw) => {
+      const line = raw.trim();
+      if (!line) return;
+      if (line.startsWith("(")) {
+        flush();
+        return;
+      }
+      if (isHeaderLine(line) || isTitleLine(line) || isRankLine(line)) {
+        flush();
+        return;
+      }
+
+      const withoutParens = line.replace(/\([^)]*\)?/g, "").trim();
+      // Bölge/kapsam satırı olmayan bazı satırlarda kelime ile sıra
+      // hücreleri aynı fiziksel satıra düşebiliyor ("Göktürk yavru
+      // köpekler - 9. Sıra 7. Sıra"); sondan başlayarak sıra-benzeri
+      // token'ları at, geriye sadece asıl kelime öbeği kalsın.
+      const tokens = withoutParens.split(/\s+/).filter(Boolean);
+      let end = tokens.length;
+      while (end > 0 && RANK_TOKEN.test(tokens[end - 1])) end--;
+      const cleaned = tokens.slice(0, end).join(" ").trim();
+      const hadTrailingRank = end < tokens.length;
+
+      if (cleaned) pending.push(cleaned);
+      // Satırın kendi içinde sıra verisi varsa bu öbek kendi kendine
+      // tamamlanmıştır (bir sonraki satır artık başka bir kelimedir).
+      if (hadTrailingRank) flush();
+    });
+    flush();
+
+    const seen = new Set();
+    return out.filter((k) => {
+      const key = k.toLocaleLowerCase("tr");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  // pdf.js'i (yerel olarak paketlenmiş) dinamik import ile yükleyip PDF'in
+  // tüm sayfalarındaki ham metin öğelerini (x, y, str) sayfa sayfa döner.
+  async function extractPdfItemsByPage(file) {
+    const pdfjsLib = await import(chrome.runtime.getURL("pdfjs/pdf.min.mjs"));
+    pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("pdfjs/pdf.worker.min.mjs");
+
+    const buf = await file.arrayBuffer();
+    const doc = await pdfjsLib.getDocument({ data: buf }).promise;
+    const pages = [];
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p);
+      const content = await page.getTextContent();
+      pages.push(content.items.map((it) => ({ x: it.transform[4], y: it.transform[5], str: it.str })));
+    }
+    return pages;
+  }
+
   function normalizeSite(raw) {
     return (raw || "")
       .trim()
@@ -480,6 +729,39 @@
     textarea.rows = 6;
     textarea.style.cssText = inputStyle + "width: 100% !important; padding: 8px !important; resize: vertical !important;";
 
+    const toolsRow = document.createElement("div");
+    toolsRow.style.cssText = [
+      "all: initial !important",
+      "display: flex !important",
+      "gap: 4px !important",
+      "flex-wrap: wrap !important",
+    ].join(";");
+
+    const smartFormatBtn = document.createElement("button");
+    smartFormatBtn.textContent = "🧠 Akıllı Düzenle";
+    smartFormatBtn.title =
+      "Yapıştırılan karışık listeyi düzenler: yan yana yazılmış kelimeleri alt alta ayırır, kırık/yarım kalmış satırları birleştirir.";
+    smartFormatBtn.style.cssText = smallBtnStyle + `background: ${THEME.navy} !important;`;
+
+    const pdfInput = document.createElement("input");
+    pdfInput.type = "file";
+    pdfInput.accept = "application/pdf";
+    pdfInput.style.cssText = "all: initial !important; display: none !important;";
+
+    const pdfBtn = document.createElement("button");
+    pdfBtn.textContent = "📄 PDF'ten Kelime Al";
+    pdfBtn.title = "PDF'teki kelime tablosundan (parantez içi ve sıra verileri hariç) kelimeleri otomatik çıkarır.";
+    pdfBtn.style.cssText = smallBtnStyle;
+    pdfBtn.addEventListener("click", () => pdfInput.click());
+
+    const toolsStatus = document.createElement("span");
+    toolsStatus.style.cssText = "all: revert !important; font-size: 11px !important; color: #333 !important; align-self: center !important;";
+
+    toolsRow.appendChild(smartFormatBtn);
+    toolsRow.appendChild(pdfBtn);
+    toolsRow.appendChild(pdfInput);
+    toolsRow.appendChild(toolsStatus);
+
     const pagesRow = document.createElement("div");
     pagesRow.style.cssText = [
       "all: initial !important",
@@ -648,6 +930,27 @@
       "text-align: center !important",
     ].join(";");
 
+    // Word/Excel gibi bir tabloya elle yapıştırmak için: her satır
+    // "kelime<TAB>sıra" biçiminde — Word tablosunda ilgili hücreye
+    // yapıştırınca sekme karakteri otomatik olarak bir sonraki hücreye
+    // geçirir, satırlar da alt satıra iner.
+    const clipboardBtn = document.createElement("button");
+    clipboardBtn.textContent = "📋 Panoya Kopyala (Word/Excel için)";
+    clipboardBtn.title = "Kelime + bulunan sıra, sekmeyle ayrılmış satırlar halinde kopyalanır; Word/Excel tablosunda ilgili hücreye yapıştırabilirsin.";
+    clipboardBtn.style.cssText = [
+      "all: initial !important",
+      "display: none !important",
+      "cursor: pointer !important",
+      "padding: 7px 10px !important",
+      "border-radius: 14px !important",
+      `background: ${THEME.tealDark} !important`,
+      "color: #fff !important",
+      "font-size: 12px !important",
+      "font-weight: 700 !important",
+      "font-family: Arial, Helvetica, sans-serif !important",
+      "text-align: center !important",
+    ].join(";");
+
     const resultsBox = document.createElement("div");
     resultsBox.style.cssText = [
       "all: initial !important",
@@ -707,6 +1010,17 @@
       );
     }
 
+    // Arama işi başka bir sekmede (paralel işçi / gizli pencere) ilerlerken
+    // bu paneldeki sonuçların bayatlamaması için depo değişikliklerini
+    // dinleyip anlık yeniden çiziyoruz; sayfayı elle yenilemeye gerek kalmaz.
+    if (chrome?.storage?.onChanged) {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "local" || !changes.snrRankJob) return;
+        const job = changes.snrRankJob.newValue;
+        if (job) renderResults(job);
+      });
+    }
+
     siteSelect.addEventListener("change", () => {
       selectedSite = siteSelect.value;
       textarea.value = (sitesData[selectedSite] || []).join("\n");
@@ -741,6 +1055,38 @@
     addBtn.addEventListener("click", addSite);
     newSiteInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") addSite();
+    });
+
+    smartFormatBtn.addEventListener("click", () => {
+      textarea.value = smartFormatKeywords(textarea.value);
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      toolsStatus.textContent = "Düzenlendi ✓";
+      setTimeout(() => (toolsStatus.textContent = ""), 1500);
+    });
+
+    pdfInput.addEventListener("change", async () => {
+      const file = pdfInput.files && pdfInput.files[0];
+      pdfInput.value = "";
+      if (!file) return;
+      if (!selectedSite) {
+        alert("Önce bir site seç veya '+ Ekle' ile oluştur.");
+        return;
+      }
+      toolsStatus.textContent = "PDF okunuyor...";
+      try {
+        const pages = await extractPdfItemsByPage(file);
+        const keywordLines = extractKeywordsFromPdfPages(pages);
+        const combined = textarea.value.trim()
+          ? textarea.value.trim() + "\n" + keywordLines.join("\n")
+          : keywordLines.join("\n");
+        textarea.value = smartFormatKeywords(combined);
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        toolsStatus.textContent = `${keywordLines.length} kelime eklendi ✓`;
+      } catch (err) {
+        console.error("[Sıra Takip] PDF okuma hatası:", err);
+        toolsStatus.textContent = "PDF okunamadı ✗";
+      }
+      setTimeout(() => (toolsStatus.textContent = ""), 3000);
     });
 
     saveBtn.addEventListener("click", () => {
@@ -834,6 +1180,37 @@
       URL.revokeObjectURL(url);
     });
 
+    function rankText(st) {
+      if (st.state === "found") return `${st.found.index}. Sıra`;
+      return "-";
+    }
+
+    clipboardBtn.addEventListener("click", async () => {
+      const job = JSON.parse(clipboardBtn.dataset.job || "{}");
+      if (!job.groups) return;
+
+      const multiSite = new Set(job.groups.flatMap((g) => g.sites)).size > 1;
+      const lines = [];
+      job.groups.forEach((group, gi) => {
+        group.sites.forEach((site) => {
+          const st = pairStatus(job, gi, group.keyword, site);
+          const cells = multiSite
+            ? [site, group.keyword, rankText(st)]
+            : [group.keyword, rankText(st)];
+          lines.push(cells.join("\t"));
+        });
+      });
+
+      const text = lines.join("\n");
+      try {
+        await navigator.clipboard.writeText(text);
+        clipboardBtn.textContent = "Kopyalandı ✓";
+      } catch {
+        clipboardBtn.textContent = "Kopyalanamadı ✗";
+      }
+      setTimeout(() => (clipboardBtn.textContent = "📋 Panoya Kopyala (Word/Excel için)"), 1800);
+    });
+
     function renderResults(job) {
       stopBtn.style.setProperty("display", job.active ? "block" : "none", "important");
       resultsBox.innerHTML = "";
@@ -873,6 +1250,8 @@
 
       copyBtn.style.setProperty("display", "block", "important");
       copyBtn.dataset.job = JSON.stringify(job);
+      clipboardBtn.style.setProperty("display", "block", "important");
+      clipboardBtn.dataset.job = JSON.stringify(job);
     }
 
     // groups: [{keyword, sites:[...]}] — AYNI kelimeyi arayan birden fazla
@@ -906,27 +1285,38 @@
             workers,
             maxPages: Math.max(1, parseInt(pagesInput.value, 10) || 5),
             slow: slowCheckbox.checked,
+            incognito,
             results: [],
             active: workers.some((w) => !w.done),
           },
         },
         () => {
+          // İşçi sekmelerini hepsini aynı anda değil, kademeli (jitter'lı)
+          // açıyoruz: aynı anda onlarca istek Google'a giderse captcha
+          // riski artar; küçük gecikmeler bunu doğal biçimde dağıtır.
           workers.forEach((worker, i) => {
             if (worker.done) return;
             const url = new URL("https://www.google.com/search");
             url.searchParams.set("q", groups[worker.queueIdx[0]].keyword);
-            if (incognito) {
-              chrome.runtime.sendMessage({
-                type: "snrOpenIncognito",
-                url: url.toString(),
-              });
-            } else if (i === 0) {
-              location.href = url.toString();
+            const launch = () => {
+              if (incognito) {
+                chrome.runtime.sendMessage({
+                  type: "snrOpenIncognito",
+                  url: url.toString(),
+                });
+              } else if (i === 0) {
+                location.href = url.toString();
+              } else {
+                chrome.runtime.sendMessage({
+                  type: "snrOpenTab",
+                  url: url.toString(),
+                });
+              }
+            };
+            if (i === 0 && !incognito) {
+              launch();
             } else {
-              chrome.runtime.sendMessage({
-                type: "snrOpenTab",
-                url: url.toString(),
-              });
+              setTimeout(launch, i * (350 + Math.random() * 300));
             }
           });
         }
@@ -1003,6 +1393,7 @@
     wrap.appendChild(siteRow);
     wrap.appendChild(newSiteRow);
     wrap.appendChild(textarea);
+    wrap.appendChild(toolsRow);
     wrap.appendChild(pagesRow);
     wrap.appendChild(parallelRow);
     wrap.appendChild(slowRow);
@@ -1013,6 +1404,7 @@
     wrap.appendChild(stopBtn);
     wrap.appendChild(resultsBox);
     wrap.appendChild(copyBtn);
+    wrap.appendChild(clipboardBtn);
     return wrap;
   }
 
@@ -1108,6 +1500,15 @@
           worker.done = true;
           job.active = job.workers.some((w) => !w.done);
           chrome.storage.local.set({ snrRankJob: job });
+          // Bu sekme, kullanıcının işi başlattığı orijinal (görünür) sekme
+          // DEĞİLSE (yani arka planda veya gizli pencerede açılmış bir işçi
+          // sekmesiyse), işi bitince kendini kapatır. Sonuçlar zaten panelde
+          // canlı güncellendiği için sekmeyi açık tutmaya gerek kalmıyor.
+          if (!(workerIndex === 0 && !job.incognito)) {
+            setTimeout(() => {
+              chrome.runtime.sendMessage({ type: "snrCloseTab" });
+            }, 1200);
+          }
           return;
         }
         worker.cursor = nextCursor;

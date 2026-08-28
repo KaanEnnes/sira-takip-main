@@ -19,6 +19,14 @@ if errorlevel 1 goto hata
 curl -fsSL "%REPO%/background.js?_=%RANDOM%" -o "%HEDEF%background.js"
 if errorlevel 1 goto hata
 
+if not exist "%HEDEF%pdfjs" mkdir "%HEDEF%pdfjs"
+
+curl -fsSL "%REPO%/pdfjs/pdf.min.mjs?_=%RANDOM%" -o "%HEDEF%pdfjs\pdf.min.mjs"
+if errorlevel 1 goto hata
+
+curl -fsSL "%REPO%/pdfjs/pdf.worker.min.mjs?_=%RANDOM%" -o "%HEDEF%pdfjs\pdf.worker.min.mjs"
+if errorlevel 1 goto hata
+
 echo.
 echo Guncelleme tamamlandi.
 echo Simdi chrome://extensions sayfasina git ve
