@@ -537,12 +537,16 @@
         bar.style.setProperty("left", left + "px", "important");
         bar.style.setProperty("top", top + "px", "important");
         bar.style.removeProperty("right");
+        captureRestRect();
+        updateTogglePosition();
       }
       function onUp() {
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
         headerBar.style.setProperty("cursor", "grab", "important");
         savePos();
+        captureRestRect();
+        updateTogglePosition();
       }
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
@@ -580,14 +584,88 @@
         const h = Math.max(120, Math.min(window.innerHeight * 0.9, startH + (ev.clientY - startY)));
         bar.style.setProperty("width", w + "px", "important");
         bar.style.setProperty("height", h + "px", "important");
+        captureRestRect();
+        updateTogglePosition();
       }
       function onUp() {
         document.removeEventListener("mousemove", onMove);
         document.removeEventListener("mouseup", onUp);
         savePos();
+        captureRestRect();
+        updateTogglePosition();
       }
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
+    });
+
+    // Sol kenara iliştirilmiş daraltma oku: tıklanınca panel sağa doğru
+    // kayarak kapanır, ok ekranın sağ kenarında sabit kalır (tekrar
+    // tıklanınca panel eski konumuna geri açılır).
+    const toggleBtn = document.createElement("div");
+    toggleBtn.textContent = "◀";
+    toggleBtn.title = "Paneli kapat";
+    toggleBtn.style.cssText = [
+      "all: initial !important",
+      "position: fixed !important",
+      "display: flex !important",
+      "align-items: center !important",
+      "justify-content: center !important",
+      "width: 28px !important",
+      "height: 28px !important",
+      "border-radius: 50% !important",
+      `background: linear-gradient(135deg, ${THEME.teal}, ${THEME.tealDark}) !important`,
+      "color: #fff !important",
+      "font-size: 13px !important",
+      "font-weight: 700 !important",
+      "cursor: pointer !important",
+      "user-select: none !important",
+      "box-shadow: 0 2px 6px rgba(22,33,58,.25) !important",
+      "z-index: 2147483647 !important",
+    ].join(";");
+    document.body.appendChild(toggleBtn);
+
+    let collapsed = false;
+    let restRect = null;
+
+    function captureRestRect() {
+      if (collapsed) return;
+      const r = bar.getBoundingClientRect();
+      restRect = { left: r.left, top: r.top, width: r.width, height: r.height };
+    }
+
+    function updateTogglePosition() {
+      if (!restRect) captureRestRect();
+      if (!restRect) return;
+      toggleBtn.style.setProperty("top", restRect.top + restRect.height / 2 - 14 + "px", "important");
+      if (collapsed) {
+        toggleBtn.style.setProperty("right", "0px", "important");
+        toggleBtn.style.removeProperty("left");
+      } else {
+        toggleBtn.style.setProperty("left", restRect.left - 14 + "px", "important");
+        toggleBtn.style.removeProperty("right");
+      }
+    }
+
+    toggleBtn.addEventListener("click", () => {
+      if (!collapsed) {
+        captureRestRect();
+        collapsed = true;
+        bar.style.setProperty("transition", "transform .25s ease", "important");
+        bar.style.setProperty("transform", "translateX(150%)", "important");
+        toggleBtn.textContent = "▶";
+        toggleBtn.title = "Paneli aç";
+      } else {
+        collapsed = false;
+        bar.style.setProperty("transform", "translateX(0)", "important");
+        toggleBtn.textContent = "◀";
+        toggleBtn.title = "Paneli kapat";
+      }
+      updateTogglePosition();
+    });
+
+    requestAnimationFrame(() => {
+      captureRestRect();
+      updateTogglePosition();
     });
 
     function makeNavButton(label, id) {
