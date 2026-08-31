@@ -1,8 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "Site Sıra Takip",
+  "name": "Bella Yazılım Sıra Takip",
   "version": "1.0",
   "description": "Google arama sonuçlarını sayfalar boyunca numaralar; ayrıca birden fazla site için ayrı kelime listeleri tanımlayıp her sitenin hangi kelimede kaçıncı sırada çıktığını otomatik tarar ve Excel'e aktarır.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "permissions": ["storage"],
   "background": {
     "service_worker": "background.js"
@@ -16,7 +21,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["pdfjs/pdf.min.mjs", "pdfjs/pdf.worker.min.mjs"],
+      "resources": ["pdfjs/pdf.min.mjs", "pdfjs/pdf.worker.min.mjs", "icons/icon48.png"],
       "matches": ["https://www.google.com/*"]
     }
   ]

@@ -473,8 +473,40 @@
       "user-select: none !important",
     ].join(";");
 
+    const brandGroup = document.createElement("div");
+    brandGroup.style.cssText = [
+      "all: initial !important",
+      "display: flex !important",
+      "align-items: center !important",
+      "gap: 6px !important",
+    ].join(";");
+
+    const brandLogoWrap = document.createElement("div");
+    brandLogoWrap.style.cssText = [
+      "all: initial !important",
+      "display: flex !important",
+      "align-items: center !important",
+      "justify-content: center !important",
+      "width: 20px !important",
+      "height: 20px !important",
+      "background: rgba(255,255,255,.92) !important",
+      "border-radius: 6px !important",
+      "flex-shrink: 0 !important",
+    ].join(";");
+    const brandLogo = document.createElement("img");
+    try {
+      brandLogo.src = chrome.runtime.getURL("icons/icon48.png");
+    } catch {}
+    brandLogo.style.cssText = [
+      "all: initial !important",
+      "display: block !important",
+      "width: 14px !important",
+      "height: 14px !important",
+    ].join(";");
+    brandLogoWrap.appendChild(brandLogo);
+
     const brandLabel = document.createElement("div");
-    brandLabel.textContent = "🔷 Sıra Takip";
+    brandLabel.textContent = "Sıra Takip";
     brandLabel.style.cssText = [
       "all: initial !important",
       "color: #fff !important",
@@ -483,6 +515,9 @@
       "font-family: 'Segoe UI', Arial, Helvetica, sans-serif !important",
       "letter-spacing: .2px !important",
     ].join(";");
+
+    brandGroup.appendChild(brandLogoWrap);
+    brandGroup.appendChild(brandLabel);
 
     const dragHandle = document.createElement("div");
     dragHandle.textContent = "☰";
@@ -494,7 +529,7 @@
       "opacity: .9 !important",
     ].join(";");
 
-    headerBar.appendChild(brandLabel);
+    headerBar.appendChild(brandGroup);
     headerBar.appendChild(dragHandle);
     bar.appendChild(headerBar);
 
@@ -639,11 +674,28 @@
     function updateTogglePosition() {
       if (!restRect) captureRestRect();
       if (!restRect) return;
-      toggleBtn.style.setProperty("top", restRect.top + restRect.height / 2 - TOGGLE_H / 2 + "px", "important");
-      const leftPos = collapsed
-        ? window.innerWidth - TOGGLE_W
-        : restRect.left - TOGGLE_W;
+      const top = Math.max(0, Math.min(window.innerHeight - TOGGLE_H, restRect.top + restRect.height / 2 - TOGGLE_H / 2));
+      toggleBtn.style.setProperty("top", top + "px", "important");
+      const rawLeft = collapsed ? window.innerWidth - TOGGLE_W : restRect.left - TOGGLE_W;
+      const leftPos = Math.max(0, Math.min(window.innerWidth - TOGGLE_W, rawLeft));
       toggleBtn.style.setProperty("left", leftPos + "px", "important");
+    }
+
+    // Kaydedilmiş konum farklı bir ekran çözünürlüğünden kalmış olabilir;
+    // paneli mevcut pencereye sığdır ki hem panel hem de ok ekran dışında
+    // kalmasın.
+    function clampBarToViewport() {
+      const rect = bar.getBoundingClientRect();
+      const maxLeft = Math.max(0, window.innerWidth - Math.min(rect.width, window.innerWidth));
+      const maxTop = Math.max(0, window.innerHeight - Math.min(rect.height, window.innerHeight));
+      const left = Math.max(0, Math.min(maxLeft, rect.left));
+      const top = Math.max(0, Math.min(maxTop, rect.top));
+      if (left !== rect.left || top !== rect.top) {
+        bar.style.setProperty("left", left + "px", "important");
+        bar.style.setProperty("top", top + "px", "important");
+        bar.style.removeProperty("right");
+        savePos();
+      }
     }
 
     toggleBtn.addEventListener("click", () => {
@@ -664,6 +716,13 @@
     });
 
     requestAnimationFrame(() => {
+      clampBarToViewport();
+      captureRestRect();
+      updateTogglePosition();
+    });
+
+    window.addEventListener("resize", () => {
+      if (!collapsed) clampBarToViewport();
       captureRestRect();
       updateTogglePosition();
     });
@@ -716,6 +775,22 @@
     if (nextLink) contentWrap.appendChild(makeNavButton("Sonraki Sayfa →", "pnnext"));
 
     contentWrap.appendChild(makeSearchBox());
+
+    // Sağ altta, göze batmayacak kadar küçük ve soluk bir imza notu.
+    const creditNote = document.createElement("div");
+    creditNote.textContent = "Developed by Kaan";
+    creditNote.style.cssText = [
+      "all: initial !important",
+      "position: absolute !important",
+      "right: 20px !important",
+      "bottom: 3px !important",
+      "font-size: 9px !important",
+      "font-family: Arial, Helvetica, sans-serif !important",
+      "color: rgba(22,33,58,.35) !important",
+      "user-select: none !important",
+      "pointer-events: none !important",
+    ].join(";");
+    bar.appendChild(creditNote);
 
     document.body.appendChild(bar);
   }
