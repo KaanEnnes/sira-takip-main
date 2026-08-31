@@ -601,6 +601,8 @@
     // Sol kenara iliştirilmiş daraltma oku: tıklanınca panel sağa doğru
     // kayarak kapanır, ok ekranın sağ kenarında sabit kalır (tekrar
     // tıklanınca panel eski konumuna geri açılır).
+    const TOGGLE_W = 18;
+    const TOGGLE_H = 52;
     const toggleBtn = document.createElement("div");
     toggleBtn.textContent = "◀";
     toggleBtn.title = "Paneli kapat";
@@ -610,17 +612,18 @@
       "display: flex !important",
       "align-items: center !important",
       "justify-content: center !important",
-      "width: 28px !important",
-      "height: 28px !important",
-      "border-radius: 50% !important",
+      `width: ${TOGGLE_W}px !important`,
+      `height: ${TOGGLE_H}px !important`,
+      "border-radius: 8px 0 0 8px !important",
       `background: linear-gradient(135deg, ${THEME.teal}, ${THEME.tealDark}) !important`,
       "color: #fff !important",
-      "font-size: 13px !important",
+      "font-size: 11px !important",
       "font-weight: 700 !important",
       "cursor: pointer !important",
       "user-select: none !important",
       "box-shadow: 0 2px 6px rgba(22,33,58,.25) !important",
       "z-index: 2147483647 !important",
+      "transition: left .25s ease !important",
     ].join(";");
     document.body.appendChild(toggleBtn);
 
@@ -636,14 +639,11 @@
     function updateTogglePosition() {
       if (!restRect) captureRestRect();
       if (!restRect) return;
-      toggleBtn.style.setProperty("top", restRect.top + restRect.height / 2 - 14 + "px", "important");
-      if (collapsed) {
-        toggleBtn.style.setProperty("right", "0px", "important");
-        toggleBtn.style.removeProperty("left");
-      } else {
-        toggleBtn.style.setProperty("left", restRect.left - 14 + "px", "important");
-        toggleBtn.style.removeProperty("right");
-      }
+      toggleBtn.style.setProperty("top", restRect.top + restRect.height / 2 - TOGGLE_H / 2 + "px", "important");
+      const leftPos = collapsed
+        ? window.innerWidth - TOGGLE_W
+        : restRect.left - TOGGLE_W;
+      toggleBtn.style.setProperty("left", leftPos + "px", "important");
     }
 
     toggleBtn.addEventListener("click", () => {
